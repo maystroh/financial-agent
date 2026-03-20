@@ -19,6 +19,8 @@ def collapse_rows(rows: list[dict]) -> list[dict]:
 
     An anchor row has a non-empty VALEUR field.
     Continuation rows (empty VALEUR) are appended to the preceding anchor's description.
+
+    Note: expects string values in row dicts (no NaN). Use keep_default_na=False when reading CSVs.
     """
     result = []
     current: dict | None = None
@@ -59,12 +61,22 @@ def collapse_rows(rows: list[dict]) -> list[dict]:
     return result
 
 
-_DATE_PREFIX_RE = re.compile(r"^(\d{1,2})\.(\d{2})")
+_DATE_PREFIX_RE = re.compile(r"^(\d{1,2})\.(\d{2})")  # matches D.MM or DD.MM prefix in DATE LIBELLE
 
 
 def parse_transaction_date(date_libelle: str, valeur: str) -> str:
-    """Parse transaction date from DATE LIBELLE prefix + year from VALEUR."""
-    val_dt = datetime.strptime(valeur, "%d.%m.%y")
+    """Parse transaction date from DATE LIBELLE prefix + year from VALEUR.
+
+    VALEUR format: DD.MM.YY (Python %y: 00-68 → 2000-2068, 69-99 → 1969-1999)
+    Year boundary: if transaction month > value month, year = valeur_year - 1.
+    Falls back to value date if prefix cannot be parsed.
+    Raises ValueError if valeur is empty or not in DD.MM.YY format.
+    """
+    try:
+        val_dt = datetime.strptime(valeur, "%d.%m.%y")
+    except (ValueError, TypeError):
+        raise ValueError(f"valeur must be in DD.MM.YY format, got: {valeur!r}")
+
     m = _DATE_PREFIX_RE.match(date_libelle.strip())
     if not m:
         return val_dt.strftime("%Y-%m-%d")

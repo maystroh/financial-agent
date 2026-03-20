@@ -1,6 +1,6 @@
 # tests/test_init_db.py
 import pytest
-from init_db import collapse_rows
+from init_db import collapse_rows, parse_transaction_date, normalize_amount
 
 def test_collapse_rows_single_anchor():
     rows = [
@@ -67,8 +67,6 @@ def test_collapse_rows_continuation_blank1_blank2():
     assert "extra1" in result[0]["description"]
     assert "extra2" in result[0]["description"]
 
-from init_db import parse_transaction_date
-
 def test_parse_date_basic():
     assert parse_transaction_date("04.04 CB LECLERC", "04.04.16") == "2016-04-04"
 
@@ -86,8 +84,6 @@ def test_parse_date_same_month_no_adjustment():
 def test_parse_date_no_match_returns_valeur_date():
     """If DATE LIBELLE prefix cannot be parsed, fall back to value date."""
     assert parse_transaction_date("CREDIT", "10.03.20") == "2020-03-10"
-
-from init_db import normalize_amount
 
 def test_normalize_amount_basic():
     assert normalize_amount("20,00") == 20.0
