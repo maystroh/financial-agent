@@ -4,7 +4,7 @@ import pytest
 import tempfile
 import os
 
-os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+os.environ.setdefault("OPENROUTER_API_KEY", "test-or-key")
 
 @pytest.fixture
 def app(tmp_path):
@@ -72,28 +72,43 @@ def _make_conv(client):
     resp = client.post("/conversations", json={"title": "Test"})
     return json.loads(resp.data)["id"]
 
+def _drain_sse(resp) -> str:
+    """Fully consume a streaming SSE response and return the body as a string.
+
+    Flask's test client returns a lazy ``Response`` for streaming endpoints.
+    Calling ``resp.data`` triggers a read, but we must also exhaust the
+    underlying generator so that any end-of-stream side-effects (e.g. the
+    assistant DB write inside ``generate()``) complete before we assert.
+    """
+    return resp.data.decode()
+
+
 def test_chat_saves_user_message(client):
     conv_id = _make_conv(client)
     mock_client = MagicMock()
-    # Minimal mock: Claude returns a simple text response with no tool use
-    mock_stream = MagicMock()
-    mock_stream.__enter__ = lambda s: s
-    mock_stream.__exit__ = MagicMock(return_value=False)
-    mock_stream.__iter__ = MagicMock(return_value=iter([]))
-    mock_stream.get_final_message.return_value = MagicMock(
-        content=[MagicMock(type="text", text="You spent €100.")],
-        stop_reason="end_turn",
-    )
-    mock_client.messages.stream.return_value = mock_stream
+    text_chunk = MagicMock()
+    text_chunk.choices = [MagicMock()]
+    text_chunk.choices[0].delta.content = "You spent €100."
+    text_chunk.choices[0].delta.tool_calls = None
+    text_chunk.choices[0].finish_reason = None
+    stop_chunk = MagicMock()
+    stop_chunk.choices = [MagicMock()]
+    stop_chunk.choices[0].delta.content = None
+    stop_chunk.choices[0].delta.tool_calls = None
+    stop_chunk.choices[0].finish_reason = "stop"
+    mock_client.chat.completions.create.return_value = iter([text_chunk, stop_chunk])
 
-    with patch("app.get_anthropic_client", return_value=mock_client):
+    with patch("app.get_ai_client", return_value=mock_client):
         resp = client.post(
             f"/conversations/{conv_id}/chat",
             json={"message": "How much did I spend?"},
         )
     assert resp.status_code == 200
+    # Drain the SSE stream so generate() runs to completion (including the
+    # assistant DB write that happens after the streaming loop).
+    _drain_sse(resp)
 
-    # Verify user message was saved
+    # Verify both messages were saved
     conv = json.loads(client.get(f"/conversations/{conv_id}").data)
     roles = [m["role"] for m in conv["messages"]]
     assert "user" in roles
@@ -102,34 +117,29 @@ def test_chat_saves_user_message(client):
 def test_chat_returns_sse_stream(client):
     conv_id = _make_conv(client)
     mock_client = MagicMock()
-    mock_stream = MagicMock()
-    mock_stream.__enter__ = lambda s: s
-    mock_stream.__exit__ = MagicMock(return_value=False)
+    chunk = MagicMock()
+    chunk.choices = [MagicMock()]
+    chunk.choices[0].delta.content = "Hello"
+    chunk.choices[0].delta.tool_calls = None
+    chunk.choices[0].finish_reason = None
+    stop = MagicMock()
+    stop.choices = [MagicMock()]
+    stop.choices[0].delta.content = None
+    stop.choices[0].delta.tool_calls = None
+    stop.choices[0].finish_reason = "stop"
+    mock_client.chat.completions.create.return_value = iter([chunk, stop])
 
-    from anthropic.types import RawContentBlockDeltaEvent, TextDelta
-    delta_event = MagicMock(spec=RawContentBlockDeltaEvent)
-    delta_event.type = "content_block_delta"
-    delta_event.delta = MagicMock(spec=TextDelta)
-    delta_event.delta.type = "text_delta"
-    delta_event.delta.text = "Hello"
-
-    mock_stream.__iter__ = MagicMock(return_value=iter([delta_event]))
-    mock_stream.get_final_message.return_value = MagicMock(
-        content=[MagicMock(type="text", text="Hello")],
-        stop_reason="end_turn",
-    )
-    mock_client.messages.stream.return_value = mock_stream
-
-    with patch("app.get_anthropic_client", return_value=mock_client):
+    with patch("app.get_ai_client", return_value=mock_client):
         resp = client.post(
             f"/conversations/{conv_id}/chat",
             json={"message": "Hi"},
         )
 
-    body = resp.data.decode()
+    # Drain stream before asserting so generate() completes cleanly
+    body = _drain_sse(resp)
     assert "token" in body
 
 def test_chat_404_for_nonexistent_conv(client):
-    with patch("app.get_anthropic_client", return_value=MagicMock()):
+    with patch("app.get_ai_client", return_value=MagicMock()):
         resp = client.post("/conversations/999/chat", json={"message": "hi"})
     assert resp.status_code == 404
