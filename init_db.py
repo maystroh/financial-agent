@@ -197,7 +197,7 @@ def categorize_batch(client: OpenAI, txs: list[dict]) -> dict[int, str]:
     prompt = _CATEGORIZE_PROMPT.format(lines="\n".join(lines))
     response = client.chat.completions.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = response.choices[0].message.content.strip()
