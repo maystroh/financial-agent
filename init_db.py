@@ -148,3 +148,131 @@ def insert_transactions(conn: sqlite3.Connection, transactions: list[dict]) -> N
         transactions,
     )
     conn.commit()
+
+
+CATEGORIES = {"groceries","rent","transport","income","cash",
+              "utilities","entertainment","health","transfers","other"}
+
+_CATEGORIZE_PROMPT = """\
+Categorize each transaction into exactly one category from this list:
+groceries, rent, transport, income, cash, utilities, entertainment, health, transfers, other
+
+Return a JSON array where each element is {{"id": <id>, "category": "<category>"}}.
+Do not include any other text.
+
+Transactions:
+{lines}"""
+
+
+def categorize_batch(client: anthropic.Anthropic, txs: list[dict]) -> dict[int, str]:
+    """Send a batch of transactions to Claude for categorization.
+
+    Args:
+        client: Anthropic client
+        txs: list of dicts with keys: id, description, debit, credit
+
+    Returns:
+        dict mapping id → category string
+    """
+    lines = []
+    for tx in txs:
+        if tx["debit"] is not None:
+            amount = f"debit:{tx['debit']}"
+        elif tx["credit"] is not None:
+            amount = f"credit:{tx['credit']}"
+        else:
+            amount = "amount:unknown"
+        lines.append(f"{tx['id']}|{tx['description']}|{amount}")
+
+    prompt = _CATEGORIZE_PROMPT.format(lines="\n".join(lines))
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = response.content[0].text.strip()
+    try:
+        items = json.loads(raw)
+        return {
+            item["id"]: item["category"] if item["category"] in CATEGORIES else "other"
+            for item in items
+        }
+    except (json.JSONDecodeError, KeyError, TypeError):
+        print(f"[warn] categorize_batch: failed to parse response, falling back to 'other'")
+        return {tx["id"]: "other" for tx in txs}
+
+
+def load_csv(csv_path: str) -> list[dict]:
+    """Read a comptes_full.csv and return list of normalized transaction dicts (no category yet)."""
+    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+    # Normalize column names (strip whitespace)
+    df.columns = [c.strip() for c in df.columns]
+    rows = df.to_dict("records")
+    collapsed = collapse_rows(rows)
+    result = []
+    for tx in collapsed:
+        transaction_date = parse_transaction_date(tx["description"], tx["valeur"])
+        value_date = datetime.strptime(tx["valeur"], "%d.%m.%y").strftime("%Y-%m-%d")
+        result.append({
+            "transaction_date": transaction_date,
+            "value_date": value_date,
+            "description": tx["description"],
+            "debit": normalize_amount(tx["debit_raw"]),
+            "credit": normalize_amount(tx["credit_raw"]),
+            "category": "other",  # filled in later by categorize step
+            "source_file": csv_path,
+            "source_row_index": tx["source_row_index"],
+        })
+    return result
+
+
+CSV_SOURCES = [
+    "bankStatements/2014_2016_current_account_output/comptes_full.csv",
+    "bankStatements/2016_2025_current_account_output/comptes_full.csv",
+]
+BATCH_SIZE = 200
+DB_PATH = "financial.db"
+
+
+def main() -> None:
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    conn = create_db(DB_PATH)
+
+    for csv_path in CSV_SOURCES:
+        if not Path(csv_path).exists():
+            print(f"[skip] {csv_path} not found")
+            continue
+        print(f"[load] {csv_path}")
+        transactions = load_csv(csv_path)
+        print(f"  {len(transactions)} transactions parsed")
+
+        # Assign IDs for batching (temporary, 1-based within this run)
+        for i, tx in enumerate(transactions):
+            tx["_tmp_id"] = i + 1
+
+        # Categorize in batches
+        categories: dict[int, str] = {}
+        for batch_start in range(0, len(transactions), BATCH_SIZE):
+            batch = transactions[batch_start: batch_start + BATCH_SIZE]
+            batch_input = [
+                {"id": tx["_tmp_id"], "description": tx["description"],
+                 "debit": tx["debit"], "credit": tx["credit"]}
+                for tx in batch
+            ]
+            print(f"  categorizing batch {batch_start // BATCH_SIZE + 1} ({len(batch)} rows)...")
+            result = categorize_batch(client, batch_input)
+            categories.update(result)
+
+        for tx in transactions:
+            tx["category"] = categories.get(tx["_tmp_id"], "other")
+            del tx["_tmp_id"]
+
+        insert_transactions(conn, transactions)
+        print(f"  done ({conn.execute('SELECT COUNT(*) FROM transactions').fetchone()[0]} total rows in DB)")
+
+    conn.close()
+    print("[done] financial.db ready")
+
+
+if __name__ == "__main__":
+    main()

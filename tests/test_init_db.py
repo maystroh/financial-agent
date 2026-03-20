@@ -185,3 +185,104 @@ def test_insert_transactions_values(tmp_path):
     insert_transactions(conn, [tx])
     row = conn.execute("SELECT transaction_date, description, debit, credit, category FROM transactions").fetchone()
     assert row == ("2020-06-15", "CB LECLERC", 10.5, None, "groceries")
+
+
+import json
+from unittest.mock import MagicMock
+from init_db import categorize_batch
+
+VALID_CATEGORIES = {"groceries","rent","transport","income","cash",
+                    "utilities","entertainment","health","transfers","other"}
+
+def test_categorize_batch_returns_mapping():
+    """categorize_batch(client, txs) → {id: category} for each tx."""
+    txs = [
+        {"id": 1, "description": "CB LECLERC 01/04/16", "debit": 3.45, "credit": None},
+        {"id": 2, "description": "PRLV SEPA LUXIOR IMMOBILIER Appel de loyer", "debit": 270.0, "credit": None},
+    ]
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = json.dumps([
+        {"id": 1, "category": "groceries"},
+        {"id": 2, "category": "rent"},
+    ])
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_response
+
+    result = categorize_batch(mock_client, txs)
+    assert result == {1: "groceries", 2: "rent"}
+
+def test_categorize_batch_falls_back_on_bad_json():
+    """If Claude returns invalid JSON, all entries in batch → 'other'."""
+    txs = [{"id": 1, "description": "UNKNOWN", "debit": 5.0, "credit": None}]
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = "sorry I can't do that"
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_response
+
+    result = categorize_batch(mock_client, txs)
+    assert result == {1: "other"}
+
+def test_categorize_batch_handles_both_none_amount():
+    """Transaction with debit=None and credit=None should not crash."""
+    txs = [{"id": 1, "description": "CREDIT", "debit": None, "credit": None}]
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = json.dumps([{"id": 1, "category": "other"}])
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_response
+    result = categorize_batch(mock_client, txs)
+    assert result == {1: "other"}
+
+def test_categorize_batch_clamps_unknown_category():
+    """If Claude returns an unknown category, clamp to 'other'."""
+    txs = [{"id": 1, "description": "CB TEST", "debit": 1.0, "credit": None}]
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock()]
+    mock_response.content[0].text = json.dumps([{"id": 1, "category": "shopping"}])
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_response
+
+    result = categorize_batch(mock_client, txs)
+    assert result[1] == "other"
+
+
+import io
+from init_db import load_csv
+
+SAMPLE_CSV = """DATE LIBELLE,BLANK1,BLANK2,VALEUR,DEBIT,CREDIT
+04.04 CB LECLERC 01/04/16,,,04.04.16,"3,45",
+05.04 PRLV SEPA LUXIOR IMMOBILIER,,,05.04.16,"270,00",
+LIBELLE:Appel de loyer du mois,,,,,
+28.04 VIREMENT SALAIRE,,,28.04.16,,"2000,00"
+"""
+
+def test_load_csv_returns_collapsed_transactions(tmp_path):
+    csv_file = tmp_path / "test.csv"
+    csv_file.write_text(SAMPLE_CSV, encoding="utf-8")
+    result = load_csv(str(csv_file))
+    # 3 anchor rows (LUXIOR continuation is merged)
+    assert len(result) == 3
+
+def test_load_csv_parses_dates(tmp_path):
+    csv_file = tmp_path / "test.csv"
+    csv_file.write_text(SAMPLE_CSV, encoding="utf-8")
+    result = load_csv(str(csv_file))
+    assert result[0]["transaction_date"] == "2016-04-04"
+    assert result[0]["value_date"] == "2016-04-04"
+
+def test_load_csv_normalizes_amounts(tmp_path):
+    csv_file = tmp_path / "test.csv"
+    csv_file.write_text(SAMPLE_CSV, encoding="utf-8")
+    result = load_csv(str(csv_file))
+    assert result[0]["debit"] == 3.45
+    assert result[0]["credit"] is None
+    assert result[2]["credit"] == 2000.0
+    assert result[2]["debit"] is None
+
+def test_load_csv_stores_source_file(tmp_path):
+    csv_file = tmp_path / "test.csv"
+    csv_file.write_text(SAMPLE_CSV, encoding="utf-8")
+    result = load_csv(str(csv_file))
+    assert all(r["source_file"] == str(csv_file) for r in result)
