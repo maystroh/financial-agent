@@ -128,8 +128,9 @@ def get_anthropic_client() -> anthropic.Anthropic:
 def _run_query(sql: str) -> list[dict]:
     """Execute a read-only SQL query. Raises on non-SELECT or error."""
     stripped = sql.strip().upper()
-    if not stripped.startswith("SELECT"):
+    if not (stripped.startswith("SELECT") or stripped.startswith("WITH")):
         raise ValueError("Only SELECT statements are allowed")
+    # Real protection: mode=ro rejects any write operation at the driver level.
     # Open read-only connection
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
