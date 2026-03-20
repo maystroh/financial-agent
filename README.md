@@ -11,7 +11,7 @@ A two-part tool for your LCL (French bank) statements:
 
 ```bash
 # 1. Install dependencies
-pip install -r requirements.txt
+poetry install
 
 # 2. Create a .env file with your Anthropic API key
 echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
@@ -21,10 +21,10 @@ python bankStatements/lcl_extractor_2014.py bankStatements/pdf/2014_2016_current
 python bankStatements/lcl_extractor.py bankStatements/pdf/2016_2025_current_account
 
 # 4. Import CSVs into SQLite and auto-categorize transactions (~5 min, calls Claude)
-python init_db.py
+poetry run python init_db.py
 
 # 5. Launch the web app
-python app.py
+poetry run python app.py
 # → Open http://localhost:5000
 ```
 
@@ -169,7 +169,7 @@ df['DEBIT'] = pd.to_numeric(df['DEBIT'].str.replace(' ', '').str.replace(',', '.
 ## Running tests
 
 ```bash
-pytest tests/ -v
+poetry run pytest tests/ -v
 # 41 tests: CSV parsing, DB schema, Flask routes, chat endpoint
 ```
 
