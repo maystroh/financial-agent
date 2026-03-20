@@ -201,6 +201,10 @@ def categorize_batch(client: OpenAI, txs: list[dict]) -> dict[int, str]:
         messages=[{"role": "user", "content": prompt}],
     )
     raw = response.choices[0].message.content.strip()
+    # Strip markdown code fences that some models add despite being asked not to
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
     try:
         items = json.loads(raw)
         return {
@@ -208,8 +212,7 @@ def categorize_batch(client: OpenAI, txs: list[dict]) -> dict[int, str]:
             for item in items
         }
     except (json.JSONDecodeError, KeyError, TypeError):
-        print(
-            f"[warn] categorize_batch: failed to parse response, falling back to 'other'")
+        print(f"[warn] categorize_batch: failed to parse response (first 200 chars): {raw[:200]!r}")
         return {tx["id"]: "other" for tx in txs}
 
 
