@@ -255,3 +255,10 @@ def chat(conv_id: int):
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+if __name__ == "__main__":
+    # Ensure DB exists (create schema if first run)
+    conn = create_db(DB_PATH)
+    conn.close()
+    app.run(debug=False, port=5000)
