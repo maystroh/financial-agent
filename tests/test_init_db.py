@@ -100,3 +100,88 @@ def test_normalize_amount_dot_already():
 
 def test_normalize_amount_period_in_string():
     assert normalize_amount(".") is None
+
+
+import sqlite3, tempfile, os
+from init_db import create_db
+
+def test_create_db_creates_transactions_table(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    conn = create_db(db_path)
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = {row[0] for row in cursor.fetchall()}
+    assert "transactions" in tables
+    assert "conversations" in tables
+    assert "messages" in tables
+    conn.close()
+
+def test_create_db_transactions_columns(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    conn = create_db(db_path)
+    cursor = conn.execute("PRAGMA table_info(transactions)")
+    cols = {row[1] for row in cursor.fetchall()}
+    assert cols == {"id", "transaction_date", "value_date", "description",
+                    "debit", "credit", "category", "source_file", "source_row_index"}
+    conn.close()
+
+def test_create_db_messages_cascade(tmp_path):
+    """Deleting a conversation must cascade-delete its messages."""
+    db_path = str(tmp_path / "test.db")
+    conn = create_db(db_path)
+    conn.execute("INSERT INTO conversations (title, created_at) VALUES ('test', '2024-01-01')")
+    conn.execute("INSERT INTO messages (conversation_id, role, content, created_at) VALUES (1, 'user', 'hi', '2024-01-01')")
+    conn.commit()
+    conn.execute("DELETE FROM conversations WHERE id = 1")
+    conn.commit()
+    cursor = conn.execute("SELECT COUNT(*) FROM messages")
+    assert cursor.fetchone()[0] == 0
+    conn.close()
+
+def test_create_db_idempotent(tmp_path):
+    """Calling create_db twice does not raise."""
+    db_path = str(tmp_path / "test.db")
+    create_db(db_path).close()
+    create_db(db_path).close()
+
+
+from init_db import insert_transactions
+
+def _make_tx(idx=0, date="2016-04-04", valeur="2016-04-04",
+             desc="CB LECLERC", debit=3.45, credit=None,
+             category="groceries", src="test.csv"):
+    return {
+        "transaction_date": date,
+        "value_date": valeur,
+        "description": desc,
+        "debit": debit,
+        "credit": credit,
+        "category": category,
+        "source_file": src,
+        "source_row_index": idx,
+    }
+
+def test_insert_transactions_basic(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    conn = create_db(db_path)
+    txs = [_make_tx(0), _make_tx(1, desc="CB SFR", debit=5.0)]
+    insert_transactions(conn, txs)
+    count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    assert count == 2
+
+def test_insert_transactions_dedup(tmp_path):
+    """Same source_file + source_row_index → silently ignored on second insert."""
+    db_path = str(tmp_path / "test.db")
+    conn = create_db(db_path)
+    tx = _make_tx(0)
+    insert_transactions(conn, [tx])
+    insert_transactions(conn, [tx])  # second time
+    count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    assert count == 1
+
+def test_insert_transactions_values(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    conn = create_db(db_path)
+    tx = _make_tx(0, date="2020-06-15", desc="CB LECLERC", debit=10.5, credit=None, category="groceries")
+    insert_transactions(conn, [tx])
+    row = conn.execute("SELECT transaction_date, description, debit, credit, category FROM transactions").fetchone()
+    assert row == ("2020-06-15", "CB LECLERC", 10.5, None, "groceries")

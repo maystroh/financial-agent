@@ -101,3 +101,50 @@ def normalize_amount(raw: str) -> float | None:
         return float(s)
     except ValueError:
         return None
+
+
+def create_db(db_path: str) -> sqlite3.Connection:
+    """Create (or open) the SQLite DB and ensure schema exists. Returns open connection."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_date TEXT NOT NULL,
+            value_date       TEXT NOT NULL,
+            description      TEXT NOT NULL,
+            debit            REAL,
+            credit           REAL,
+            category         TEXT NOT NULL DEFAULT 'other',
+            source_file      TEXT NOT NULL,
+            source_row_index INTEGER NOT NULL,
+            UNIQUE(source_file, source_row_index)
+        );
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            title      TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            role            TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            content         TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    return conn
+
+
+def insert_transactions(conn: sqlite3.Connection, transactions: list[dict]) -> None:
+    """Insert transaction dicts into DB. Skips duplicates silently."""
+    conn.executemany(
+        """INSERT OR IGNORE INTO transactions
+           (transaction_date, value_date, description, debit, credit, category, source_file, source_row_index)
+           VALUES (:transaction_date, :value_date, :description, :debit, :credit, :category, :source_file, :source_row_index)""",
+        transactions,
+    )
+    conn.commit()
