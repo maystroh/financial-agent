@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Financial Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <button id="new-chat-btn">+ New Chat</button>
+      <ul id="conv-list"></ul>
+    </aside>
+    <main id="chat-panel">
+      <div id="chat-header">
+        <span id="chat-title">Select or start a conversation</span>
+      </div>
+      <div id="messages"></div>
+      <div id="input-area">
+        <textarea id="user-input" placeholder="Ask about your finances… (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
+        <button id="send-btn">&#9658;</button>
+      </div>
+    </main>
+  </div>
+  <script>
+    let currentConvId = null;
+
+    // ── API helpers ─────────────────────────────────────────────────────────
+    async function api(method, path, body) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body) opts.body = JSON.stringify(body);
+      const resp = await fetch(path, opts);
+      return resp.json();
+    }
+
+    // ── Sidebar ─────────────────────────────────────────────────────────────
+    async function loadSidebar() {
+      const convs = await api("GET", "/conversations");
+      const list = document.getElementById("conv-list");
+      list.innerHTML = "";
+      for (const c of convs) {
+        const li = document.createElement("li");
+        li.textContent = c.title;
+        li.dataset.id = c.id;
+        if (c.id === currentConvId) li.classList.add("active");
+        li.addEventListener("click", () => loadConversation(c.id));
+        list.appendChild(li);
+      }
+    }
+
+    // ── Conversation loading ─────────────────────────────────────────────────
+    async function loadConversation(convId) {
+      currentConvId = convId;
+      const data = await api("GET", `/conversations/${convId}`);
+      document.getElementById("chat-title").textContent = data.title;
+      const msgDiv = document.getElementById("messages");
+      msgDiv.innerHTML = "";
+      for (const m of data.messages) {
+        appendMessage(m.role, m.content, false);
+      }
+      msgDiv.scrollTop = msgDiv.scrollHeight;
+      await loadSidebar();
+    }
+
+    // ── Message rendering ────────────────────────────────────────────────────
+    function appendMessage(role, content, streaming = false) {
+      const msgDiv = document.getElementById("messages");
+      const bubble = document.createElement("div");
+      bubble.classList.add("bubble", role);
+      if (role === "assistant") {
+        bubble.innerHTML = marked.parse(content || "");
+      } else {
+        bubble.textContent = content;
+      }
+      if (streaming) bubble.id = "streaming-bubble";
+      msgDiv.appendChild(bubble);
+      msgDiv.scrollTop = msgDiv.scrollHeight;
+      return bubble;
+    }
+
+    function showThinking() {
+      const msgDiv = document.getElementById("messages");
+      const el = document.createElement("div");
+      el.classList.add("bubble", "assistant", "thinking");
+      el.id = "thinking-indicator";
+      el.textContent = "thinking…";
+      msgDiv.appendChild(el);
+      msgDiv.scrollTop = msgDiv.scrollHeight;
+    }
+
+    function removeThinking() {
+      const el = document.getElementById("thinking-indicator");
+      if (el) el.remove();
+    }
+
+    // ── Send message ─────────────────────────────────────────────────────────
+    async function sendMessage() {
+      const input = document.getElementById("user-input");
+      const text = input.value.trim();
+      if (!text || !currentConvId) return;
+      input.value = "";
+      input.disabled = true;
+      document.getElementById("send-btn").disabled = true;
+
+      appendMessage("user", text);
+      showThinking();
+
+      const resp = await fetch(`/conversations/${currentConvId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let assistantBubble = null;
+      let assistantText = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+          if (evt.type === "token") {
+            removeThinking();
+            if (!assistantBubble) {
+              assistantBubble = appendMessage("assistant", "", true);
+            }
+            assistantText += evt.text;
+            assistantBubble.innerHTML = marked.parse(assistantText);
+            document.getElementById("messages").scrollTop = document.getElementById("messages").scrollHeight;
+          } else if (evt.type === "tool_call") {
+            // Show a brief query indicator
+            if (assistantBubble) {
+              assistantBubble.dataset.querying = "true";
+            }
+          } else if (evt.type === "error") {
+            removeThinking();
+            appendMessage("assistant", `**Error:** ${evt.message}`);
+          } else if (evt.type === "done") {
+            if (assistantBubble) assistantBubble.removeAttribute("id");
+          }
+        }
+      }
+
+      await loadSidebar();
+      input.disabled = false;
+      document.getElementById("send-btn").disabled = false;
+      input.focus();
+    }
+
+    // ── New chat ─────────────────────────────────────────────────────────────
+    document.getElementById("new-chat-btn").addEventListener("click", async () => {
+      const data = await api("POST", "/conversations", { title: "New Chat" });
+      currentConvId = data.id;
+      document.getElementById("chat-title").textContent = "New Chat";
+      document.getElementById("messages").innerHTML = "";
+      await loadSidebar();
+    });
+
+    // ── Send on Enter ────────────────────────────────────────────────────────
+    document.getElementById("user-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+    document.getElementById("send-btn").addEventListener("click", sendMessage);
+
+    // ── Init ─────────────────────────────────────────────────────────────────
+    loadSidebar();
+  </script>
+</body>
+</html>

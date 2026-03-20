@@ -1,0 +1,6 @@
+bankstatements/
+.env
+financial.db
+__pycache__/
+*.pyc
+.worktrees/
