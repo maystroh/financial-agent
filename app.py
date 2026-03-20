@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, Response, g, jsonify, render_template, request, stream_with_context
-import anthropic
+from openai import OpenAI
 
 from init_db import create_db
 
@@ -103,26 +103,35 @@ Be concise. Format monetary amounts with € symbol and 2 decimal places.
 When showing multiple transactions, use a markdown table."""
 
 QUERY_DB_TOOL = {
-    "name": "query_db",
-    "description": (
-        "Execute a read-only SQL SELECT query against the financial database. "
-        "Use this to look up transactions, compute totals, filter by category, date range, etc."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "sql": {
-                "type": "string",
-                "description": "A SELECT statement only. No INSERT, UPDATE, DELETE, or DROP.",
-            }
+    "type": "function",
+    "function": {
+        "name": "query_db",
+        "description": (
+            "Execute a read-only SQL SELECT query against the financial database. "
+            "Use this to look up transactions, compute totals, filter by category, date range, etc."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "A SELECT statement only. No INSERT, UPDATE, DELETE, or DROP.",
+                }
+            },
+            "required": ["sql"],
         },
-        "required": ["sql"],
     },
 }
 
 
-def get_anthropic_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+MODEL = os.environ.get("MODEL", "google/gemini-3-flash-preview")
+
+
+def get_ai_client() -> OpenAI:
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
+    )
 
 
 def _run_query(sql: str) -> list[dict]:
@@ -178,78 +187,86 @@ def chat(conv_id: int):
     messages = [{"role": r["role"], "content": r["content"]} for r in reversed(history)]
 
     def generate():
-        client = get_anthropic_client()
-        full_response = ""
+        try:
+            client = get_ai_client()
+            full_response = ""
 
-        # Agentic loop: Claude may call query_db multiple times
-        current_messages = messages[:]
-        while True:
-            with client.messages.stream(
-                model="claude-sonnet-4-6",
-                max_tokens=2048,
-                system=SYSTEM_PROMPT,
-                tools=[QUERY_DB_TOOL],
-                messages=current_messages,
-            ) as stream:
-                # Stream text tokens as they arrive
-                for event in stream:
-                    event_type = getattr(event, "type", None)
-                    if event_type == "content_block_delta":
-                        delta = getattr(event, "delta", None)
-                        if delta and getattr(delta, "type", None) == "text_delta":
-                            yield _sse({"type": "token", "text": delta.text})
-                            full_response += delta.text
+            current_messages = messages[:]
+            while True:
+                tool_calls_acc = {}   # index → {id, name, args}
+                finish_reason = None
 
-                final = stream.get_final_message()
+                stream = client.chat.completions.create(
+                    model=MODEL,
+                    max_tokens=2048,
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}] + current_messages,
+                    tools=[QUERY_DB_TOOL],
+                    stream=True,
+                )
 
-            stop_reason = final.stop_reason
+                for chunk in stream:
+                    choice = chunk.choices[0]
+                    if choice.delta.content:
+                        yield _sse({"type": "token", "text": choice.delta.content})
+                        full_response += choice.delta.content
+                    if choice.delta.tool_calls:
+                        for tc in choice.delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {"id": tc.id, "name": tc.function.name, "args": ""}
+                            if tc.function.arguments:
+                                tool_calls_acc[idx]["args"] += tc.function.arguments
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
 
-            if stop_reason == "tool_use":
-                # Handle tool calls
-                tool_results = []
-                for block in final.content:
-                    if block.type == "tool_use" and block.name == "query_db":
-                        sql = block.input.get("sql", "")
+                if finish_reason == "tool_calls":
+                    tool_calls = [
+                        {"id": v["id"], "type": "function",
+                         "function": {"name": v["name"], "arguments": v["args"]}}
+                        for _, v in sorted(tool_calls_acc.items(), key=lambda kv: kv[0])
+                    ]
+                    current_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    })
+                    for tc in tool_calls:
+                        sql = json.loads(tc["function"]["arguments"]).get("sql", "")
                         yield _sse({"type": "tool_call", "sql": sql})
                         try:
                             rows = _run_query(sql)
                             yield _sse({"type": "tool_result", "rows": len(rows)})
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
+                            current_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
                                 "content": json.dumps(rows),
                             })
                         except Exception as e:
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
+                            yield _sse({"type": "tool_error", "message": str(e)})
+                            current_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
                                 "content": f"Error: {e}",
-                                "is_error": True,
                             })
+                    full_response = ""  # reset; only final text-generating iteration saved
+                else:
+                    break
 
-                current_messages.append({"role": "assistant", "content": final.content})
-                current_messages.append({"role": "user", "content": tool_results})
-                full_response = ""  # reset; final text comes in next iteration
-            else:
-                # end_turn or other — done
-                break
+            # Save complete assistant response
+            db2 = sqlite3.connect(DB_PATH)
+            db2.execute(
+                "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                (conv_id, full_response, _now()),
+            )
+            db2.commit()
+            db2.close()
 
-        # Save complete assistant response
-        db2 = sqlite3.connect(DB_PATH)
-        db2.execute(
-            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
-            (conv_id, full_response, _now()),
-        )
-        db2.commit()
-        db2.close()
-
-        yield _sse({"type": "done"})
-
-    def generate_safe():
-        try:
-            yield from generate()
+            yield _sse({"type": "done"})
         except Exception as e:
             yield _sse({"type": "error", "message": str(e)})
+
+    def generate_safe():
+        yield from generate()
 
     return Response(
         stream_with_context(generate_safe()),

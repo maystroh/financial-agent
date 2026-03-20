@@ -201,13 +201,13 @@ def test_categorize_batch_returns_mapping():
         {"id": 2, "description": "PRLV SEPA LUXIOR IMMOBILIER Appel de loyer", "debit": 270.0, "credit": None},
     ]
     mock_response = MagicMock()
-    mock_response.content = [MagicMock()]
-    mock_response.content[0].text = json.dumps([
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps([
         {"id": 1, "category": "groceries"},
         {"id": 2, "category": "rent"},
     ])
     mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_response
+    mock_client.chat.completions.create.return_value = mock_response
 
     result = categorize_batch(mock_client, txs)
     assert result == {1: "groceries", 2: "rent"}
@@ -216,10 +216,10 @@ def test_categorize_batch_falls_back_on_bad_json():
     """If Claude returns invalid JSON, all entries in batch → 'other'."""
     txs = [{"id": 1, "description": "UNKNOWN", "debit": 5.0, "credit": None}]
     mock_response = MagicMock()
-    mock_response.content = [MagicMock()]
-    mock_response.content[0].text = "sorry I can't do that"
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "sorry I can't do that"
     mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_response
+    mock_client.chat.completions.create.return_value = mock_response
 
     result = categorize_batch(mock_client, txs)
     assert result == {1: "other"}
@@ -228,10 +228,10 @@ def test_categorize_batch_handles_both_none_amount():
     """Transaction with debit=None and credit=None should not crash."""
     txs = [{"id": 1, "description": "CREDIT", "debit": None, "credit": None}]
     mock_response = MagicMock()
-    mock_response.content = [MagicMock()]
-    mock_response.content[0].text = json.dumps([{"id": 1, "category": "other"}])
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps([{"id": 1, "category": "other"}])
     mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_response
+    mock_client.chat.completions.create.return_value = mock_response
     result = categorize_batch(mock_client, txs)
     assert result == {1: "other"}
 
@@ -239,10 +239,10 @@ def test_categorize_batch_clamps_unknown_category():
     """If Claude returns an unknown category, clamp to 'other'."""
     txs = [{"id": 1, "description": "CB TEST", "debit": 1.0, "credit": None}]
     mock_response = MagicMock()
-    mock_response.content = [MagicMock()]
-    mock_response.content[0].text = json.dumps([{"id": 1, "category": "shopping"}])
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps([{"id": 1, "category": "shopping"}])
     mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_response
+    mock_client.chat.completions.create.return_value = mock_response
 
     result = categorize_batch(mock_client, txs)
     assert result[1] == "other"

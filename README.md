@@ -13,14 +13,15 @@ A two-part tool for your LCL (French bank) statements:
 # 1. Install dependencies (requires Poetry)
 poetry install
 
-# 2. Create a .env file with your Anthropic API key
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+# 2. Create a .env file with your OpenRouter API key
+echo "OPENROUTER_API_KEY=sk-or-..." > .env
+echo "MODEL=google/gemini-3-flash-preview" >> .env   # optional, this is the default
 
 # 3. Extract PDFs to CSV (if not already done — see Extractors section below)
 python bankStatements/lcl_extractor_2014.py bankStatements/pdf/2014_2016_current_account
 python bankStatements/lcl_extractor.py bankStatements/pdf/2016_2025_current_account
 
-# 4. Import CSVs into SQLite and auto-categorize transactions (~5 min, calls Claude)
+# 4. Import CSVs into SQLite and auto-categorize transactions (~5 min, calls the AI model via OpenRouter)
 poetry run python init_db.py
 
 # 5. Launch the web app
@@ -36,7 +37,7 @@ poetry run python app.py
 PDFs  ──►  lcl_extractor*.py  ──►  comptes_full.csv
                                          │
                                     init_db.py
-                                    (categorize via Claude)
+                                    (categorize via OpenRouter AI)
                                          │
                                     financial.db (SQLite)
                                          │
@@ -51,13 +52,13 @@ Reads the two `comptes_full.csv` files, processes each row:
 - **Collapses multi-line rows** (LCL splits long descriptions across multiple CSV rows)
 - **Parses dates** from the `DATE LIBELLE` prefix + `VALEUR` year, handles Dec/Jan year boundary
 - **Normalizes amounts** from French locale (`1 234,56` → `1234.56`)
-- **Batch-categorizes** all transactions via Claude (`claude-sonnet-4-6`) in batches of 200
+- **Batch-categorizes** all transactions via OpenRouter AI (configurable via `MODEL` env var, default: `google/gemini-3-flash-preview`) in batches of 200
 - **Inserts into SQLite** with deduplication (safe to run multiple times)
 
 ### `app.py` — Flask web app
 
 - Persistent multi-conversation chat interface
-- Claude uses a `query_db` tool to run read-only SQL against `financial.db`
+- The AI model uses a `query_db` tool to run read-only SQL against `financial.db`
 - Responses stream token-by-token via SSE (Server-Sent Events)
 - Conversation history stored in SQLite and restored on page reload
 
@@ -78,7 +79,7 @@ Transaction categories: `groceries`, `rent`, `transport`, `income`, `cash`, `uti
 Open `http://localhost:5000` after running `python app.py`.
 
 - Click **+ New Chat** to start a conversation
-- Ask questions in plain English — Claude queries the database and answers
+- Ask questions in plain English — the AI model queries the database and answers
 - Conversation titles are set automatically from your first message
 - All conversations persist across page reloads
 
